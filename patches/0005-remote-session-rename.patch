@@ -1,0 +1,69 @@
+From 7f37246a0aea8c584ce6707fea3a685de43ffb6c Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Thu, 7 May 2026 01:53:39 +0530
+Subject: [PATCH] Support renaming remote sessions
+
+---
+ src/tui/app/remote/key_handling.rs | 46 ++++++++++++++++++++++++++++++
+ 1 file changed, 46 insertions(+)
+
+diff --git a/src/tui/app/remote/key_handling.rs b/src/tui/app/remote/key_handling.rs
+index 6aa437e..82ea22d 100644
+--- a/src/tui/app/remote/key_handling.rs
++++ b/src/tui/app/remote/key_handling.rs
+@@ -1551,6 +1551,52 @@ async fn handle_remote_key_internal(
+                     return Ok(());
+                 }
+ 
++                if trimmed == "/rename" || trimmed.starts_with("/rename ") {
++                    let title = trimmed.strip_prefix("/rename").unwrap_or_default().trim();
++                    if title.is_empty() {
++                        app.push_display_message(DisplayMessage::error(
++                            "Usage: `/rename <session name>` or `/rename --clear`".to_string(),
++                        ));
++                        return Ok(());
++                    }
++
++                    if title == "--clear" {
++                        if let Err(e) = persist_remote_session_metadata(app, |session| {
++                            session.rename_title(None);
++                        }) {
++                            app.push_display_message(DisplayMessage::error(format!(
++                                "Failed to clear session name: {}",
++                                e
++                            )));
++                            return Ok(());
++                        }
++                        let name = app.session.display_name().to_string();
++                        app.push_display_message(DisplayMessage::system(format!(
++                            "Cleared custom name for session **{}**.",
++                            name,
++                        )));
++                        app.set_status_notice("Session name cleared");
++                        return Ok(());
++                    }
++
++                    let new_title = title.to_string();
++                    if let Err(e) = persist_remote_session_metadata(app, |session| {
++                        session.rename_title(Some(new_title.clone()));
++                    }) {
++                        app.push_display_message(DisplayMessage::error(format!(
++                            "Failed to rename session: {}",
++                            e
++                        )));
++                        return Ok(());
++                    }
++                    app.push_display_message(DisplayMessage::system(format!(
++                        "Renamed session to **{}**.",
++                        title,
++                    )));
++                    app.set_status_notice("Session renamed");
++                    return Ok(());
++                }
++
+                 if trimmed == "/split" {
+                     app.push_display_message(DisplayMessage::system(
+                         "Splitting session...".to_string(),
+-- 
+2.54.0
+

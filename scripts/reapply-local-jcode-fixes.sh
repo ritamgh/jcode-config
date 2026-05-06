@@ -48,6 +48,7 @@ apply_patch_file "$PATCH_DIR/0001-opencode-cache-model-routing.patch"
 apply_patch_file "$PATCH_DIR/0002-manual-compaction-native-auto.patch"
 apply_patch_file "$PATCH_DIR/0003-manual-compaction-live-manager.patch"
 apply_patch_file "$PATCH_DIR/0004-renamed-session-title-display-name.patch"
+apply_patch_file "$PATCH_DIR/0005-remote-session-rename.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing
