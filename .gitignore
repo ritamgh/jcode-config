@@ -1,0 +1,13 @@
+# Deny by default. This repo is for portable Jcode config and local patch scripts only.
+*
+
+# Tracked config
+!.gitignore
+!README.md
+!config.toml
+
+# Local source patches and helper scripts
+!patches/
+!patches/**
+!scripts/
+!scripts/**

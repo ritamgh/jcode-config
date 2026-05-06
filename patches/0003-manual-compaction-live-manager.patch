@@ -1,0 +1,51 @@
+From 28756a53d28983a5a27c64de7310d0f05c883860 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Wed, 6 May 2026 21:48:42 +0530
+Subject: [PATCH] Run manual compaction on live agent manager
+
+---
+ src/agent/provider.rs        | 10 ++++++++--
+ src/server/client_actions.rs |  2 +-
+ 2 files changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/src/agent/provider.rs b/src/agent/provider.rs
+index 8e9e1ab..7e56995 100644
+--- a/src/agent/provider.rs
++++ b/src/agent/provider.rs
+@@ -37,12 +37,18 @@ impl Agent {
+         self.registry.clone()
+     }
+ 
++    pub fn compaction_manager(
++        &self,
++    ) -> Arc<tokio::sync::RwLock<crate::compaction::CompactionManager>> {
++        self.registry.compaction()
++    }
++
+     pub async fn compaction_mode(&self) -> crate::config::CompactionMode {
+-        self.registry.compaction().read().await.mode()
++        self.compaction_manager().read().await.mode()
+     }
+ 
+     pub async fn set_compaction_mode(&self, mode: crate::config::CompactionMode) -> Result<()> {
+-        let compaction = self.registry.compaction();
++        let compaction = self.compaction_manager();
+         let mut manager = compaction.write().await;
+         manager.set_mode(mode);
+         Ok(())
+diff --git a/src/server/client_actions.rs b/src/server/client_actions.rs
+index 01a4a54..21fb9d1 100644
+--- a/src/server/client_actions.rs
++++ b/src/server/client_actions.rs
+@@ -767,7 +767,7 @@ pub(super) fn handle_compact(
+         let mut agent_guard = agent.lock().await;
+         let session_id = agent_guard.session_id().to_string();
+         let provider = agent_guard.provider_fork();
+-        let compaction = agent_guard.registry().compaction();
++        let compaction = agent_guard.compaction_manager();
+         let messages = agent_guard.provider_messages();
+         drop(agent_guard);
+ 
+-- 
+2.54.0
+
