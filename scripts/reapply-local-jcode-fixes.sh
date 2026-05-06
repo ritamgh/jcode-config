@@ -51,6 +51,7 @@ apply_patch_file "$PATCH_DIR/0004-renamed-session-title-display-name.patch"
 apply_patch_file "$PATCH_DIR/0005-remote-session-rename.patch"
 apply_patch_file "$PATCH_DIR/0006-ghostty-child-sessions-tabs.patch"
 apply_patch_file "$PATCH_DIR/0007-ghostty-tabs-no-window-fallback.patch"
+apply_patch_file "$PATCH_DIR/0008-server-owned-session-metadata.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing

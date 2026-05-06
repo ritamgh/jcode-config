@@ -1,0 +1,301 @@
+From 127ecc969aaf23fdafcd6d7b7984cabdc944f6b1 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Thu, 7 May 2026 02:20:57 +0530
+Subject: [PATCH] Persist remote session metadata through server
+
+---
+ crates/jcode-protocol/src/lib.rs   | 15 +++++++
+ src/agent.rs                       | 15 +++++++
+ src/server/client_actions.rs       | 71 ++++++++++++++++++++++++++++++
+ src/server/client_lifecycle.rs     | 17 ++++++-
+ src/tui/app/remote/key_handling.rs | 20 ++++-----
+ src/tui/backend.rs                 | 22 +++++++++
+ 6 files changed, 146 insertions(+), 14 deletions(-)
+
+diff --git a/crates/jcode-protocol/src/lib.rs b/crates/jcode-protocol/src/lib.rs
+index 5016425..4be4e23 100644
+--- a/crates/jcode-protocol/src/lib.rs
++++ b/crates/jcode-protocol/src/lib.rs
+@@ -274,6 +274,18 @@ pub enum Request {
+         mode: jcode_config_types::CompactionMode,
+     },
+ 
++    /// Rename the current session. `None` clears the custom title.
++    #[serde(rename = "rename_session")]
++    RenameSession { id: u64, title: Option<String> },
++
++    /// Save/bookmark the current session with an optional label.
++    #[serde(rename = "save_session")]
++    SaveSession { id: u64, label: Option<String> },
++
++    /// Remove the saved/bookmark marker from the current session.
++    #[serde(rename = "unsave_session")]
++    UnsaveSession { id: u64 },
++
+     /// Split the current session — clone conversation into a new session
+     #[serde(rename = "split")]
+     Split { id: u64 },
+@@ -1866,6 +1878,9 @@ impl Request {
+             Request::SetPremiumMode { id, .. } => *id,
+             Request::SetFeature { id, .. } => *id,
+             Request::SetCompactionMode { id, .. } => *id,
++            Request::RenameSession { id, .. } => *id,
++            Request::SaveSession { id, .. } => *id,
++            Request::UnsaveSession { id } => *id,
+             Request::Split { id } => *id,
+             Request::Transfer { id } => *id,
+             Request::Compact { id } => *id,
+diff --git a/src/agent.rs b/src/agent.rs
+index 1f8bb23..2392e91 100644
+--- a/src/agent.rs
++++ b/src/agent.rs
+@@ -646,6 +646,21 @@ impl Agent {
+         &self.session.id
+     }
+ 
++    pub fn rename_session_title(&mut self, title: Option<String>) -> anyhow::Result<()> {
++        self.session.rename_title(title);
++        self.session.save()
++    }
++
++    pub fn mark_session_saved(&mut self, label: Option<String>) -> anyhow::Result<()> {
++        self.session.mark_saved(label);
++        self.session.save()
++    }
++
++    pub fn unmark_session_saved(&mut self) -> anyhow::Result<()> {
++        self.session.unmark_saved();
++        self.session.save()
++    }
++
+     /// Mark this agent session as closed and persist it.
+     pub fn mark_closed(&mut self) {
+         crate::telemetry::end_session_with_reason(
+diff --git a/src/server/client_actions.rs b/src/server/client_actions.rs
+index 21fb9d1..a7b0848 100644
+--- a/src/server/client_actions.rs
++++ b/src/server/client_actions.rs
+@@ -691,6 +691,77 @@ pub(super) async fn handle_split(
+     });
+ }
+ 
++pub(super) async fn handle_rename_session(
++    id: u64,
++    title: Option<String>,
++    agent: &Arc<Mutex<Agent>>,
++    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
++) {
++    let result = {
++        let mut agent_guard = agent.lock().await;
++        agent_guard.rename_session_title(title)
++    };
++    match result {
++        Ok(()) => {
++            let _ = client_event_tx.send(ServerEvent::Done { id });
++        }
++        Err(error) => {
++            let _ = client_event_tx.send(ServerEvent::Error {
++                id,
++                message: format!("Failed to rename session: {error}"),
++                retry_after_secs: None,
++            });
++        }
++    }
++}
++
++pub(super) async fn handle_save_session(
++    id: u64,
++    label: Option<String>,
++    agent: &Arc<Mutex<Agent>>,
++    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
++) {
++    let result = {
++        let mut agent_guard = agent.lock().await;
++        agent_guard.mark_session_saved(label)
++    };
++    match result {
++        Ok(()) => {
++            let _ = client_event_tx.send(ServerEvent::Done { id });
++        }
++        Err(error) => {
++            let _ = client_event_tx.send(ServerEvent::Error {
++                id,
++                message: format!("Failed to save session: {error}"),
++                retry_after_secs: None,
++            });
++        }
++    }
++}
++
++pub(super) async fn handle_unsave_session(
++    id: u64,
++    agent: &Arc<Mutex<Agent>>,
++    client_event_tx: &mpsc::UnboundedSender<ServerEvent>,
++) {
++    let result = {
++        let mut agent_guard = agent.lock().await;
++        agent_guard.unmark_session_saved()
++    };
++    match result {
++        Ok(()) => {
++            let _ = client_event_tx.send(ServerEvent::Done { id });
++        }
++        Err(error) => {
++            let _ = client_event_tx.send(ServerEvent::Error {
++                id,
++                message: format!("Failed to unsave session: {error}"),
++                retry_after_secs: None,
++            });
++        }
++    }
++}
++
+ pub(super) async fn handle_transfer(
+     id: u64,
+     client_session_id: &str,
+diff --git a/src/server/client_lifecycle.rs b/src/server/client_lifecycle.rs
+index 5d0f969..0d14b48 100644
+--- a/src/server/client_lifecycle.rs
++++ b/src/server/client_lifecycle.rs
+@@ -1,7 +1,8 @@
+ use super::client_actions::{
+     AgentTaskContext, NotifySessionContext, handle_agent_task, handle_compact, handle_input_shell,
+-    handle_notify_session, handle_run_subagent, handle_set_feature, handle_set_subagent_model,
+-    handle_split, handle_stdin_response, handle_transfer, handle_trigger_memory_extraction,
++    handle_notify_session, handle_rename_session, handle_run_subagent, handle_save_session,
++    handle_set_feature, handle_set_subagent_model, handle_split, handle_stdin_response,
++    handle_transfer, handle_trigger_memory_extraction, handle_unsave_session,
+ };
+ use super::client_comm::{
+     handle_comm_channel_members, handle_comm_list, handle_comm_list_channels, handle_comm_message,
+@@ -1791,6 +1792,18 @@ pub(super) async fn handle_client(
+                 handle_set_compaction_mode(id, mode, &agent, &client_event_tx).await;
+             }
+ 
++            Request::RenameSession { id, title } => {
++                handle_rename_session(id, title, &agent, &client_event_tx).await;
++            }
++
++            Request::SaveSession { id, label } => {
++                handle_save_session(id, label, &agent, &client_event_tx).await;
++            }
++
++            Request::UnsaveSession { id } => {
++                handle_unsave_session(id, &agent, &client_event_tx).await;
++            }
++
+             Request::NotifyAuthChanged { id } => {
+                 handle_notify_auth_changed(
+                     id,
+diff --git a/src/tui/app/remote/key_handling.rs b/src/tui/app/remote/key_handling.rs
+index 82ea22d..907abcf 100644
+--- a/src/tui/app/remote/key_handling.rs
++++ b/src/tui/app/remote/key_handling.rs
+@@ -1498,15 +1498,14 @@ async fn handle_remote_key_internal(
+                     } else {
+                         Some(label.to_string())
+                     };
+-                    if let Err(e) = persist_remote_session_metadata(app, |session| {
+-                        session.mark_saved(label.clone());
+-                    }) {
++                    if let Err(e) = remote.save_session(label.clone()).await {
+                         app.push_display_message(DisplayMessage::error(format!(
+                             "Failed to save session: {}",
+                             e
+                         )));
+                         return Ok(());
+                     }
++                    app.session.mark_saved(label.clone());
+                     if app.memory_enabled
+                         && let Err(err) = remote.trigger_memory_extraction().await
+                     {
+@@ -1533,15 +1532,14 @@ async fn handle_remote_key_internal(
+                 }
+ 
+                 if trimmed == "/unsave" {
+-                    if let Err(e) = persist_remote_session_metadata(app, |session| {
+-                        session.unmark_saved();
+-                    }) {
++                    if let Err(e) = remote.unsave_session().await {
+                         app.push_display_message(DisplayMessage::error(format!(
+                             "Failed to save session: {}",
+                             e
+                         )));
+                         return Ok(());
+                     }
++                    app.session.unmark_saved();
+                     let name = app.session.display_name().to_string();
+                     app.push_display_message(DisplayMessage::system(format!(
+                         "Removed bookmark from session **{}**.",
+@@ -1561,15 +1559,14 @@ async fn handle_remote_key_internal(
+                     }
+ 
+                     if title == "--clear" {
+-                        if let Err(e) = persist_remote_session_metadata(app, |session| {
+-                            session.rename_title(None);
+-                        }) {
++                        if let Err(e) = remote.rename_session(None).await {
+                             app.push_display_message(DisplayMessage::error(format!(
+                                 "Failed to clear session name: {}",
+                                 e
+                             )));
+                             return Ok(());
+                         }
++                        app.session.rename_title(None);
+                         let name = app.session.display_name().to_string();
+                         app.push_display_message(DisplayMessage::system(format!(
+                             "Cleared custom name for session **{}**.",
+@@ -1580,15 +1577,14 @@ async fn handle_remote_key_internal(
+                     }
+ 
+                     let new_title = title.to_string();
+-                    if let Err(e) = persist_remote_session_metadata(app, |session| {
+-                        session.rename_title(Some(new_title.clone()));
+-                    }) {
++                    if let Err(e) = remote.rename_session(Some(new_title.clone())).await {
+                         app.push_display_message(DisplayMessage::error(format!(
+                             "Failed to rename session: {}",
+                             e
+                         )));
+                         return Ok(());
+                     }
++                    app.session.rename_title(Some(new_title));
+                     app.push_display_message(DisplayMessage::system(format!(
+                         "Renamed session to **{}**.",
+                         title,
+diff --git a/src/tui/backend.rs b/src/tui/backend.rs
+index da583bd..c1fc539 100644
+--- a/src/tui/backend.rs
++++ b/src/tui/backend.rs
+@@ -713,6 +713,28 @@ impl RemoteConnection {
+             .await
+     }
+ 
++    /// Rename the server-owned active session. `None` clears the custom title.
++    pub async fn rename_session(&mut self, title: Option<String>) -> Result<()> {
++        let id = self.next_request_id;
++        self.next_request_id += 1;
++        self.send_request(Request::RenameSession { id, title })
++            .await
++    }
++
++    /// Save/bookmark the server-owned active session with an optional label.
++    pub async fn save_session(&mut self, label: Option<String>) -> Result<()> {
++        let id = self.next_request_id;
++        self.next_request_id += 1;
++        self.send_request(Request::SaveSession { id, label }).await
++    }
++
++    /// Remove the saved/bookmark marker from the server-owned active session.
++    pub async fn unsave_session(&mut self) -> Result<()> {
++        let id = self.next_request_id;
++        self.next_request_id += 1;
++        self.send_request(Request::UnsaveSession { id }).await
++    }
++
+     /// Notify the server that auth credentials changed (e.g., after login)
+     pub async fn notify_auth_changed(&mut self) -> Result<()> {
+         let id = self.next_request_id;
+-- 
+2.54.0
+
