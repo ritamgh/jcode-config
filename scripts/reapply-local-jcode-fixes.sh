@@ -47,9 +47,11 @@ apply_patch_file() {
 apply_patch_file "$PATCH_DIR/0001-opencode-cache-model-routing.patch"
 apply_patch_file "$PATCH_DIR/0002-manual-compaction-native-auto.patch"
 apply_patch_file "$PATCH_DIR/0003-manual-compaction-live-manager.patch"
+apply_patch_file "$PATCH_DIR/0004-renamed-session-title-display-name.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing
 cargo test messages_for_provider_
+cargo test display_name_prefers_renamed_title_over_generated_short_name
 
 echo "Done. Local Jcode fixes are applied in: $SRC"

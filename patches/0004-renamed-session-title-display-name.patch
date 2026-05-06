@@ -1,0 +1,60 @@
+From 30e86aa12521dc83b1e0e690e1dc659dae83d227 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Thu, 7 May 2026 01:45:42 +0530
+Subject: [PATCH] Prefer renamed session title in display names
+
+---
+ src/session.rs             |  9 +++++++--
+ src/session_tests/cases.rs | 14 ++++++++++++++
+ 2 files changed, 21 insertions(+), 2 deletions(-)
+
+diff --git a/src/session.rs b/src/session.rs
+index dd29607..83ae6a3 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -858,10 +858,15 @@ impl Session {
+         false
+     }
+ 
+-    /// Get the display name for this session (short memorable name if available)
++    /// Get the display name for this session.
++    ///
++    /// A user-provided title from `/rename` takes precedence so saved sessions,
++    /// session picker rows, and status messages use the name the user chose
++    /// instead of the generated memorable short name.
+     pub fn display_name(&self) -> &str {
+-        self.short_name
++        self.title
+             .as_deref()
++            .or(self.short_name.as_deref())
+             .or_else(|| extract_session_name(&self.id))
+             .unwrap_or(&self.id)
+     }
+diff --git a/src/session_tests/cases.rs b/src/session_tests/cases.rs
+index 6e4a001..135d5f3 100644
+--- a/src/session_tests/cases.rs
++++ b/src/session_tests/cases.rs
+@@ -1,6 +1,20 @@
+ use super::*;
+ use anyhow::{Result, anyhow};
+ 
++#[test]
++fn display_name_prefers_renamed_title_over_generated_short_name() {
++    let mut session =
++        Session::create_with_id("session_cat_1234567890_deadbeef".to_string(), None, None);
++
++    assert_eq!(session.display_name(), "cat");
++
++    session.rename_title(Some("Jcode compact/model routing debug".to_string()));
++    assert_eq!(session.display_name(), "Jcode compact/model routing debug");
++
++    session.rename_title(None);
++    assert_eq!(session.display_name(), "cat");
++}
++
+ #[test]
+ fn test_session_exists_roundtrip() -> Result<()> {
+     let tmp_dir = std::env::temp_dir().join(format!(
+-- 
+2.54.0
+
