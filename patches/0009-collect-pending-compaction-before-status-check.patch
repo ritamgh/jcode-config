@@ -1,0 +1,77 @@
+From 0927d0ece52f41be6b100e3555928aeec01326b2 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Thu, 7 May 2026 20:39:05 +0530
+Subject: [PATCH] Fix stuck compaction: collect completed tasks before /compact
+ status check
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two fixes:
+
+1. Server path (client_actions::handle_compact) and TUI path (commands::compact):
+   Call check_and_apply_compaction_with() + take_compaction_event() before
+   reading stats. Previously a completed background compaction task would
+   sit in pending_task forever if the user only ran slash commands (no API
+   calls), blocking all future /compact invocations.
+
+2. TUI poll_compaction_completion guard:
+   Changed uses_jcode_compaction() → supports_compaction() so native-auto
+   providers also get their CompactionFinished bus events collected by the
+   TUI polling loop instead of only on the next API call.
+---
+ src/server/client_actions.rs      | 6 ++++++
+ src/tui/app/commands.rs           | 6 ++++++
+ src/tui/app/conversation_state.rs | 2 +-
+ 3 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/src/server/client_actions.rs b/src/server/client_actions.rs
+index a7b0848..6630b41 100644
+--- a/src/server/client_actions.rs
++++ b/src/server/client_actions.rs
+@@ -853,6 +853,12 @@ pub(super) fn handle_compact(
+ 
+         let result = match compaction.try_write() {
+             Ok(mut manager) => {
++                // Collect any previously completed background compaction before
++                // checking status — otherwise a finished task from a prior
++                // /compact sits in "in progress" forever, blocking new requests.
++                manager.check_and_apply_compaction_with(&messages);
++                let _event = manager.take_compaction_event(); // consume stale event
++
+                 let stats = manager.stats_with(&messages);
+                 let status_msg = format!(
+                     "**Context Status:**\n\
+diff --git a/src/tui/app/commands.rs b/src/tui/app/commands.rs
+index 7bc7a0e..b62dded 100644
+--- a/src/tui/app/commands.rs
++++ b/src/tui/app/commands.rs
+@@ -1949,6 +1949,12 @@ pub(super) fn handle_config_command(app: &mut App, trimmed: &str) -> bool {
+         match compaction.try_write() {
+             Ok(mut manager) => {
+                 let provider_messages = app.materialized_provider_messages();
++
++                // Collect any previously completed background compaction
++                // before checking status — see client_actions.rs for rationale.
++                manager.check_and_apply_compaction_with(&provider_messages);
++                let _event = manager.take_compaction_event();
++
+                 let stats = manager.stats_with(&provider_messages);
+                 let status_msg = format!(
+                     "**Context Status:**\n\
+diff --git a/src/tui/app/conversation_state.rs b/src/tui/app/conversation_state.rs
+index c108205..2b4fce3 100644
+--- a/src/tui/app/conversation_state.rs
++++ b/src/tui/app/conversation_state.rs
+@@ -364,7 +364,7 @@ impl App {
+     }
+ 
+     pub(super) fn poll_compaction_completion(&mut self) -> bool {
+-        if self.is_remote || !self.provider.uses_jcode_compaction() {
++        if self.is_remote || !self.provider.supports_compaction() {
+             return false;
+         }
+         let provider_messages = self.materialized_provider_messages();
+-- 
+2.54.0
+
