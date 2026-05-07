@@ -31,5 +31,6 @@ apply_one() {
 
 apply_one "$PATCH_DIR/0002-manual-compaction-native-auto.patch"
 apply_one "$PATCH_DIR/0003-manual-compaction-live-manager.patch"
+apply_one "$PATCH_DIR/0009-collect-pending-compaction-before-status-check.patch"
 cargo fmt
 cargo test messages_for_provider_
