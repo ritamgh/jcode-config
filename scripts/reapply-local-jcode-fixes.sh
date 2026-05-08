@@ -91,6 +91,7 @@ apply_patch_file "$PATCH_DIR/0008-server-owned-session-metadata.patch"
 apply_patch_file "$PATCH_DIR/0009-collect-pending-compaction-before-status-check.patch"
 apply_patch_file "$PATCH_DIR/0011-verified-interlang-request-compression.patch"
 apply_diff_patch_file "$PATCH_DIR/0012-lossless-tool-result-spilling.patch"
+apply_patch_file "$PATCH_DIR/0013-tui-compaction-progress-native-auto.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing
