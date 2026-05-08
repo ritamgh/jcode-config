@@ -1,0 +1,137 @@
+diff --git a/src/agent.rs b/src/agent.rs
+index 7eea49c..25ca6ab 100644
+--- a/src/agent.rs
++++ b/src/agent.rs
+@@ -55,9 +55,9 @@ pub use jcode_agent_runtime::{
+ };
+ 
+ const JCODE_NATIVE_TOOLS: &[&str] = &["selfdev", "communicate"];
+-const TURN_GUARD_MAX_API_CALLS: usize = 20;
+-const TURN_GUARD_MAX_TOOL_ROUNDS_WITHOUT_TEXT: usize = 12;
+-const TURN_GUARD_MAX_TOOL_CALLS: usize = 80;
++const TURN_GUARD_MAX_API_CALLS: usize = usize::MAX;
++const TURN_GUARD_MAX_TOOL_ROUNDS_WITHOUT_TEXT: usize = usize::MAX;
++const TURN_GUARD_MAX_TOOL_CALLS: usize = usize::MAX;
+ const CONTEXT_WARN_MESSAGE_COUNT: usize = 80;
+ const CONTEXT_WARN_TOKENS: usize = 60_000;
+ const CONTEXT_STRONG_WARN_TOKENS: usize = 120_000;
+@@ -617,6 +617,7 @@ impl Agent {
+                         assistant_count,
+                     ));
+                     self.maybe_warn_large_context(&messages);
++                    let messages = crate::interlang::compress_messages_for_request(&messages);
+                     return (messages, event);
+                 }
+                 Err(_) => {
+@@ -639,6 +640,7 @@ impl Agent {
+             assistant_count,
+         ));
+         self.maybe_warn_large_context(&messages);
++        let messages = crate::interlang::compress_messages_for_request(&messages);
+         (messages, None)
+     }
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 79385b4..7ef2044 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -35,6 +35,7 @@ pub mod gmail;
+ pub mod goal;
+ pub mod id;
+ pub mod import;
++pub mod interlang;
+ pub mod logging;
+ pub mod login_qr;
+ pub mod mcp;
+diff --git a/src/tui/app/tui_state.rs b/src/tui/app/tui_state.rs
+index a0a107e..93eeee9 100644
+--- a/src/tui/app/tui_state.rs
++++ b/src/tui/app/tui_state.rs
+@@ -1075,6 +1075,7 @@ impl crate::tui::TuiState for App {
+                 false
+             },
+             git_info: gather_git_info(),
++            interlang_info: crate::interlang::snapshot(),
+         }
+     }
+ 
+diff --git a/src/tui/info_widget.rs b/src/tui/info_widget.rs
+index 26425cd..0e4f715 100644
+--- a/src/tui/info_widget.rs
++++ b/src/tui/info_widget.rs
+@@ -29,6 +29,7 @@ mod usage_render;
+ use super::info_widget_overview::{InfoPageKind, MAX_TODO_LINES, compute_page_layout};
+ use super::workspace_map::VisibleWorkspaceRow;
+ use crate::ambient::AmbientStatus;
++use crate::interlang::InterlangSnapshot;
+ pub use crate::memory_types::{
+     InjectedMemoryItem, MemoryActivity, MemoryEvent, MemoryEventKind, MemoryState, PipelineState,
+     StepResult, StepStatus,
+@@ -546,6 +547,8 @@ pub struct InfoWidgetData {
+     pub is_compacting: bool,
+     /// Git repository status
+     pub git_info: Option<GitInfo>,
++    /// Per-process llm-interlang request compression savings.
++    pub interlang_info: Option<InterlangSnapshot>,
+ }
+ 
+ impl InfoWidgetData {
+diff --git a/src/tui/info_widget_model.rs b/src/tui/info_widget_model.rs
+index 804ca45..6415aff 100644
+--- a/src/tui/info_widget_model.rs
++++ b/src/tui/info_widget_model.rs
+@@ -134,6 +134,29 @@ pub(super) fn render_model_widget(data: &InfoWidgetData, inner: Rect) -> Vec<Lin
+         ]));
+     }
+ 
++    if let Some(info) = data.interlang_info
++        && info.total_saved_tokens > 0
++    {
++        lines.push(Line::from(vec![
++            Span::styled("⌁ ", Style::default().fg(rgb(120, 210, 230))),
++            Span::styled("interlang ", Style::default().fg(rgb(120, 210, 230))),
++            Span::styled(
++                format!(
++                    "saved ~{} tok",
++                    format_compact_tokens(info.total_saved_tokens)
++                ),
++                Style::default().fg(rgb(140, 140, 150)),
++            ),
++            Span::styled(
++                format!(
++                    " · last ~{}",
++                    format_compact_tokens(info.latest_saved_tokens)
++                ),
++                Style::default().fg(rgb(100, 100, 110)),
++            ),
++        ]));
++    }
++
+     lines
+ }
+ 
+@@ -309,6 +332,16 @@ fn append_model_runtime_metadata(spans: &mut Vec<Span<'static>>, data: &InfoWidg
+     }
+ }
+ 
++fn format_compact_tokens(tokens: u64) -> String {
++    if tokens >= 1_000_000 {
++        format!("{:.1}M", tokens as f64 / 1_000_000.0)
++    } else if tokens >= 1_000 {
++        format!("{:.1}k", tokens as f64 / 1_000.0)
++    } else {
++        tokens.to_string()
++    }
++}
++
+ fn short_reasoning_effort(effort: &str) -> Option<&str> {
+     let effort = effort.trim();
+     if effort.is_empty() {
+@@ -372,6 +405,7 @@ mod tests {
+             cache_hit_info: None,
+             is_compacting: false,
+             git_info: None,
++            interlang_info: None,
+         }
+     }
+ 

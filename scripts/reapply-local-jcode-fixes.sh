@@ -20,9 +20,25 @@ fi
 apply_patch_file() {
   local patch="$1"
   local subject
-  subject="$(grep -m1 '^Subject: ' "$patch" | sed 's/^Subject: \[[^]]*\] //; s/^Subject: //')"
+  local existing_subjects
+  subject="$(
+    awk '
+      /^Subject: / {
+        sub(/^Subject: \[[^]]*\] /, "")
+        sub(/^Subject: /, "")
+        line = $0
+        while ((getline nextline) > 0 && nextline ~ /^[[:space:]]/) {
+          sub(/^[[:space:]]+/, " ", nextline)
+          line = line nextline
+        }
+        print line
+        exit
+      }
+    ' "$patch"
+  )"
+  existing_subjects="$(git log --format=%s --all)"
 
-  if git log --format=%s --all | grep -Fxq "$subject"; then
+  if grep -Fxq "$subject" <<<"$existing_subjects"; then
     echo "✓ already present: $subject"
     return 0
   fi
@@ -52,10 +68,15 @@ apply_patch_file "$PATCH_DIR/0005-remote-session-rename.patch"
 apply_patch_file "$PATCH_DIR/0006-ghostty-child-sessions-tabs.patch"
 apply_patch_file "$PATCH_DIR/0007-ghostty-tabs-no-window-fallback.patch"
 apply_patch_file "$PATCH_DIR/0008-server-owned-session-metadata.patch"
+apply_patch_file "$PATCH_DIR/0009-collect-pending-compaction-before-status-check.patch"
+apply_patch_file "$PATCH_DIR/0011-verified-interlang-request-compression.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing
 cargo test messages_for_provider_
+cargo test agent::tools::tests
+cargo test context_guard
+cargo test interlang::tests
 cargo test display_name_prefers_renamed_title_over_generated_short_name
 cargo test -p jcode-terminal-launch ghostty_spawn_uses_adjacent_tab_applescript_without_new_window_fallback
 
