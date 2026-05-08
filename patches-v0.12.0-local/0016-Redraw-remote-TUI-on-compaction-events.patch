@@ -1,0 +1,57 @@
+From 8239ff8f5603a9b7bb39f2e3a26ae71fe2472f0a Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 02:04:39 +0530
+Subject: [PATCH 16/17] Redraw remote TUI on compaction events
+
+---
+ src/tui/app/remote/server_events.rs                  | 4 ++--
+ src/tui/app/tests/remote_events_reload_02/part_02.rs | 4 +++-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/src/tui/app/remote/server_events.rs b/src/tui/app/remote/server_events.rs
+index bece64f0..48aff9d3 100644
+--- a/src/tui/app/remote/server_events.rs
++++ b/src/tui/app/remote/server_events.rs
+@@ -1213,7 +1213,7 @@ pub(in crate::tui::app) fn handle_server_event(
+                 summary_chars,
+                 active_messages,
+             });
+-            false
++            true
+         }
+         ServerEvent::SplitResponse {
+             new_session_id,
+@@ -1326,7 +1326,7 @@ pub(in crate::tui::app) fn handle_server_event(
+                 app.push_display_message(DisplayMessage::system(message));
+                 app.set_status_notice("Compaction failed");
+             }
+-            false
++            true
+         }
+         ServerEvent::StdinRequest { .. } => {
+             app.set_status_notice("⌨ Interactive terminal detected (command will timeout)");
+diff --git a/src/tui/app/tests/remote_events_reload_02/part_02.rs b/src/tui/app/tests/remote_events_reload_02/part_02.rs
+index 31622894..7d40cf3d 100644
+--- a/src/tui/app/tests/remote_events_reload_02/part_02.rs
++++ b/src/tui/app/tests/remote_events_reload_02/part_02.rs
+@@ -210,7 +210,7 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
+     app.session.provider_session_id = Some("provider-session".to_string());
+     app.context_warning_shown = true;
+ 
+-    app.handle_server_event(
++    let needs_redraw = app.handle_server_event(
+         crate::protocol::ServerEvent::Compaction {
+             trigger: "semantic".to_string(),
+             pre_tokens: Some(12_345),
+@@ -225,6 +225,8 @@ fn test_handle_server_event_compaction_shows_completion_message_in_remote_mode()
+         &mut remote,
+     );
+ 
++    assert!(needs_redraw, "remote compaction completion must redraw immediately");
++
+     assert!(app.provider_session_id.is_none());
+     assert!(app.session.provider_session_id.is_none());
+     assert!(!app.context_warning_shown);
+-- 
+2.54.0
+

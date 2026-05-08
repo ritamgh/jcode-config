@@ -1,0 +1,25 @@
+From 3c60ee2afa736b716b4b000c5897ee6a86a0fa1e Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 01:44:34 +0530
+Subject: [PATCH 13/17] Fix interlang hook unit test
+
+---
+ src/interlang.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/interlang.rs b/src/interlang.rs
+index b40a1eb2..473703a4 100644
+--- a/src/interlang.rs
++++ b/src/interlang.rs
+@@ -38,6 +38,7 @@ mod tests {
+     #[test]
+     fn compression_hook_is_lossless_without_external_compressor() {
+         let messages: Vec<Message> = Vec::new();
+-        assert_eq!(compress_messages_for_request(&messages), messages);
++        let compressed = compress_messages_for_request(&messages);
++        assert_eq!(compressed.len(), messages.len());
+     }
+ }
+-- 
+2.54.0
+

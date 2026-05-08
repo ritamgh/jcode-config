@@ -1,0 +1,151 @@
+From 1157030156b01d4b1eab00e2f66e2231fdb7d986 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 01:11:00 +0530
+Subject: [PATCH 12/17] Fix TUI compaction progress for native-auto providers
+
+---
+ src/compaction_tests.rs           | 31 +++++++++++++++++++++++++++++++
+ src/tui/app/conversation_state.rs |  8 ++++----
+ src/tui/app/model_context.rs      |  5 ++++-
+ src/tui/app/tui_state.rs          |  6 +++---
+ 4 files changed, 42 insertions(+), 8 deletions(-)
+
+diff --git a/src/compaction_tests.rs b/src/compaction_tests.rs
+index a9d752e7..60c8e203 100644
+--- a/src/compaction_tests.rs
++++ b/src/compaction_tests.rs
+@@ -262,6 +262,37 @@ async fn test_guard_between_80_and_95_starts_background_only() {
+     );
+ }
+ 
++#[tokio::test]
++async fn test_proactive_mode_starts_from_token_snapshots_before_80_percent() {
++    let mut manager = CompactionManager::new().with_budget(1_000);
++    manager.set_mode(crate::config::CompactionMode::Proactive);
++
++    let mut messages = Vec::new();
++    for i in 0..20 {
++        messages.push(make_text_message(Role::User, &format!("msg {}", i)));
++        manager.notify_message_added();
++    }
++
++    // Ten snapshots satisfy the proactive cooldown and establish growth. The
++    // current context is only 68%, below the reactive 80% threshold, but the
++    // projected growth crosses 80%, so proactive compaction should start.
++    for tokens in [410, 440, 470, 500, 530, 560, 590, 620, 650, 680] {
++        manager.update_observed_input_tokens(tokens);
++        manager.push_token_snapshot(tokens);
++    }
++
++    let provider: Arc<dyn Provider> = Arc::new(MockSummaryProvider);
++    let action = manager.ensure_context_fits(&messages, provider);
++    assert_eq!(
++        action,
++        CompactionAction::BackgroundStarted {
++            trigger: "proactive".to_string()
++        },
++        "proactive mode should start background compaction from token snapshots before the reactive threshold"
++    );
++    assert!(manager.is_compacting());
++}
++
+ #[tokio::test]
+ async fn test_guard_at_95_triggers_hard_compact() {
+     let mut manager = CompactionManager::new().with_budget(1_000);
+diff --git a/src/tui/app/conversation_state.rs b/src/tui/app/conversation_state.rs
+index 25fc3386..59022aa2 100644
+--- a/src/tui/app/conversation_state.rs
++++ b/src/tui/app/conversation_state.rs
+@@ -205,7 +205,7 @@ impl App {
+             self.ensure_provider_messages_hydrated();
+             self.messages.push(message.clone());
+         }
+-        if self.is_remote || !self.provider.uses_jcode_compaction() {
++        if self.is_remote || !self.provider.supports_compaction() {
+             return;
+         }
+         let compaction = self.registry.compaction();
+@@ -238,7 +238,7 @@ impl App {
+ 
+     pub(super) fn reseed_compaction_from_provider_messages(&mut self) {
+         if self.is_remote
+-            || (!self.provider.uses_jcode_compaction() && self.session.compaction.is_none())
++            || (!self.provider.supports_compaction() && self.session.compaction.is_none())
+         {
+             return;
+         }
+@@ -327,7 +327,7 @@ impl App {
+             return (self.messages.clone(), None);
+         }
+         let base_messages = self.materialized_provider_messages();
+-        if !self.provider.uses_jcode_compaction() && self.session.compaction.is_none() {
++        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
+             return (base_messages, None);
+         }
+         let compaction = self.registry.compaction();
+@@ -349,7 +349,7 @@ impl App {
+                     }
+                 }
+                 let messages = manager.messages_for_api_with(&base_messages);
+-                let event = if self.provider.uses_jcode_compaction() {
++                let event = if self.provider.supports_compaction() {
+                     manager.take_compaction_event()
+                 } else {
+                     None
+diff --git a/src/tui/app/model_context.rs b/src/tui/app/model_context.rs
+index e430ff72..f5cb95f9 100644
+--- a/src/tui/app/model_context.rs
++++ b/src/tui/app/model_context.rs
+@@ -313,7 +313,7 @@ impl App {
+     }
+ 
+     pub(super) fn update_compaction_usage_from_stream(&mut self) {
+-        if self.is_remote || !self.provider.uses_jcode_compaction() {
++        if self.is_remote || !self.provider.supports_compaction() {
+             return;
+         }
+         let Some(tokens) = self.current_stream_context_tokens() else {
+@@ -322,6 +322,9 @@ impl App {
+         let compaction = self.registry.compaction();
+         if let Ok(mut manager) = compaction.try_write() {
+             manager.update_observed_input_tokens(tokens);
++            if self.provider.uses_jcode_compaction() {
++                manager.push_token_snapshot(tokens);
++            }
+         };
+     }
+ 
+diff --git a/src/tui/app/tui_state.rs b/src/tui/app/tui_state.rs
+index ddb72bad..df041cad 100644
+--- a/src/tui/app/tui_state.rs
++++ b/src/tui/app/tui_state.rs
+@@ -544,7 +544,7 @@ impl crate::tui::TuiState for App {
+ 
+     fn status_notice(&self) -> Option<String> {
+         if !self.is_remote
+-            && self.provider.uses_jcode_compaction()
++            && self.provider.supports_compaction()
+             && let Ok(manager) = self.registry.compaction().try_read()
+             && manager.is_compacting()
+         {
+@@ -666,7 +666,7 @@ impl crate::tui::TuiState for App {
+                 }
+             }
+         } else {
+-            let skip = if self.provider.uses_jcode_compaction() {
++            let skip = if self.provider.supports_compaction() {
+                 let compaction = self.registry.compaction();
+                 let result = compaction
+                     .try_read()
+@@ -1068,7 +1068,7 @@ impl crate::tui::TuiState for App {
+             ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
+             observed_context_tokens: self.current_stream_context_tokens(),
+             cache_hit_info,
+-            is_compacting: if !self.is_remote && self.provider.uses_jcode_compaction() {
++            is_compacting: if !self.is_remote && self.provider.supports_compaction() {
+                 let compaction = self.registry.compaction();
+                 compaction
+                     .try_read()
+-- 
+2.54.0
+

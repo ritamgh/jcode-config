@@ -9,5 +9,7 @@
 # Local source patches and helper scripts
 !patches/
 !patches/**
+!patches-v0.12.0-local/
+!patches-v0.12.0-local/**
 !scripts/
 !scripts/**

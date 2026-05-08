@@ -1,0 +1,25 @@
+From b9e406e18ea62e0c5386238676c2a7891f1f3cd3 Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 01:55:27 +0530
+Subject: [PATCH 15/17] Update lockfile for v0.12 local build
+
+---
+ Cargo.lock | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 0b545552..895c13c1 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3260,7 +3260,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+ 
+ [[package]]
+ name = "jcode"
+-version = "0.11.4"
++version = "0.12.0"
+ dependencies = [
+  "agentgrep",
+  "anyhow",
+-- 
+2.54.0
+

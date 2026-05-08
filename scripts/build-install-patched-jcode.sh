@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SRC="${1:-${JCODE_SRC:-/tmp/jcode-src}}"
-INSTALL_DIR="$HOME/.jcode/builds/versions/opencode-cache-fix"
+SRC="${1:-${JCODE_SRC:-/tmp/jcode-latest-port}}"
+INSTALL_DIR="${JCODE_INSTALL_DIR:-$HOME/.jcode/builds/versions/v0.12.0-local-patches}"
+SOURCE_SNAPSHOT_DIR="${JCODE_SOURCE_SNAPSHOT_DIR:-$HOME/.jcode/builds/sources/v0.12.0-local-patches}"
+PATCH_DIR="${JCODE_PATCH_DIR:-$HOME/.jcode/patches-v0.12.0-local}"
+BASE_REF="${JCODE_BASE_REF:-v0.12.0}"
 
 if [[ ! -d "$SRC/.git" ]]; then
   echo "error: '$SRC' is not a git checkout. Pass the Jcode source path as the first arg." >&2
@@ -15,12 +18,23 @@ cd "$SRC"
 cargo build --release --bin jcode
 
 mkdir -p "$INSTALL_DIR"
-cp target/release/jcode "$INSTALL_DIR/jcode"
-chmod +x "$INSTALL_DIR/jcode"
+tmp_bin="$INSTALL_DIR/jcode.tmp.$$"
+cp target/release/jcode "$tmp_bin"
+chmod +x "$tmp_bin"
+mv "$tmp_bin" "$INSTALL_DIR/jcode"
 ln -sfn "$INSTALL_DIR/jcode" "$HOME/.jcode/builds/current/jcode"
 ln -sfn "$INSTALL_DIR/jcode" "$HOME/.jcode/builds/stable/jcode"
 
-"$INSTALL_DIR/jcode" version | head -8 || true
+rm -rf "$SOURCE_SNAPSHOT_DIR"
+mkdir -p "$SOURCE_SNAPSHOT_DIR"
+tar --exclude='./target' --exclude='./.git' -cf - . | tar -C "$SOURCE_SNAPSHOT_DIR" -xf -
+git rev-parse HEAD > "$SOURCE_SNAPSHOT_DIR/.jcode-source-commit"
+
+rm -rf "$PATCH_DIR"
+mkdir -p "$PATCH_DIR"
+git format-patch -o "$PATCH_DIR" "$BASE_REF..HEAD"
+
+"$INSTALL_DIR/jcode" --version || "$INSTALL_DIR/jcode" version | head -8 || true
 cat <<MSG
 
 Installed patched Jcode to:
@@ -30,8 +44,7 @@ Repointed:
   ~/.jcode/builds/current/jcode
   ~/.jcode/builds/stable/jcode
 
-Restart Jcode to use the installed binary:
-  pkill -f "$HOME/.jcode/builds/stable/jcode --provider auto serve" || true
-  pkill -f "$HOME/.jcode/builds/current/jcode --fresh-spawn" || true
-  jcode
+Refreshed:
+  $SOURCE_SNAPSHOT_DIR
+  $PATCH_DIR
 MSG

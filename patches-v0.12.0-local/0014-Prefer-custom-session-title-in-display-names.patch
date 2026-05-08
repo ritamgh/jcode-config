@@ -1,0 +1,27 @@
+From 19caf0ddd98fd189630e45b3475fa26abb8590ba Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 01:46:22 +0530
+Subject: [PATCH 14/17] Prefer custom session title in display names
+
+---
+ src/session.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/session.rs b/src/session.rs
+index 14e55ec6..d0d3d326 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -891,8 +891,9 @@ impl Session {
+     /// session picker rows, and status messages use the name the user chose
+     /// instead of the generated memorable short name.
+     pub fn display_name(&self) -> &str {
+-        self.title
++        self.custom_title
+             .as_deref()
++            .or(self.title.as_deref())
+             .or(self.short_name.as_deref())
+             .or_else(|| extract_session_name(&self.id))
+             .unwrap_or(&self.id)
+-- 
+2.54.0
+

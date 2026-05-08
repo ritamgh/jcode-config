@@ -1,0 +1,70 @@
+From d4d342dd9ccaaaf80aafb6e55475102b466648dc Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 02:17:06 +0530
+Subject: [PATCH 17/17] Forward compaction completion to remote clients
+
+---
+ src/agent.rs                   | 16 ++++++++++++++++
+ src/server/client_lifecycle.rs | 19 +++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/src/agent.rs b/src/agent.rs
+index 4e4cfcd5..06f50c75 100644
+--- a/src/agent.rs
++++ b/src/agent.rs
+@@ -511,6 +511,22 @@ impl Agent {
+         (messages, None)
+     }
+ 
++    pub(crate) fn poll_compaction_event_for_current_session(&mut self) -> Option<CompactionEvent> {
++        if !self.provider.supports_compaction() && self.session.compaction.is_none() {
++            return None;
++        }
++
++        let provider_messages = self.session.provider_messages();
++        let compaction = self.registry.compaction();
++        let Ok(mut manager) = compaction.try_write() else {
++            return None;
++        };
++
++        let event = manager.poll_compaction_event_with(provider_messages)?;
++        self.sync_session_compaction_state_from_manager(&manager);
++        Some(event)
++    }
++
+     fn record_client_cache_request(&mut self, messages: &[Message]) {
+         if !self.should_track_client_cache() {
+             return;
+diff --git a/src/server/client_lifecycle.rs b/src/server/client_lifecycle.rs
+index fea49e0b..50c55564 100644
+--- a/src/server/client_lifecycle.rs
++++ b/src/server/client_lifecycle.rs
+@@ -1177,6 +1177,25 @@ pub(super) async fn handle_client(
+                             });
+                         }
+                     }
++                    Ok(BusEvent::CompactionFinished) => {
++                        let event = {
++                            let mut agent_guard = agent.lock().await;
++                            agent_guard.poll_compaction_event_for_current_session()
++                        };
++                        if let Some(event) = event {
++                            let _ = client_event_tx.send(ServerEvent::Compaction {
++                                trigger: event.trigger,
++                                pre_tokens: event.pre_tokens,
++                                post_tokens: event.post_tokens,
++                                tokens_saved: event.tokens_saved,
++                                duration_ms: event.duration_ms,
++                                messages_dropped: event.messages_dropped,
++                                messages_compacted: event.messages_compacted,
++                                summary_chars: event.summary_chars,
++                                active_messages: event.active_messages,
++                            });
++                        }
++                    }
+                     _ => {}
+                 }
+                 continue;
+-- 
+2.54.0
+

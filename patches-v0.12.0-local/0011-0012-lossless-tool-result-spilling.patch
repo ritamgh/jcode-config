@@ -1,0 +1,664 @@
+From 30345019214b27ab983f31d590928d5f822e5d5e Mon Sep 17 00:00:00 2001
+From: Ritam <ritamdotghosh@gmail.com>
+Date: Sat, 9 May 2026 01:38:56 +0530
+Subject: [PATCH 11/17] 0012-lossless-tool-result-spilling
+
+---
+ crates/jcode-config-types/src/lib.rs |  28 ++
+ src/agent.rs                         |   9 +
+ src/lib.rs                           |   1 +
+ src/session.rs                       |  27 ++
+ src/tool/mod.rs                      |  12 +
+ src/tool/read_tool_artifact.rs       |  84 ++++++
+ src/tool_artifacts.rs                | 402 +++++++++++++++++++++++++++
+ 7 files changed, 563 insertions(+)
+ create mode 100644 src/tool/read_tool_artifact.rs
+ create mode 100644 src/tool_artifacts.rs
+
+diff --git a/crates/jcode-config-types/src/lib.rs b/crates/jcode-config-types/src/lib.rs
+index 0dfb6d9c..2a514263 100644
+--- a/crates/jcode-config-types/src/lib.rs
++++ b/crates/jcode-config-types/src/lib.rs
+@@ -570,6 +570,25 @@ pub struct FeatureConfig {
+     pub swarm: bool,
+     /// Inject timestamps into user messages and tool results sent to the model (default: true)
+     pub message_timestamps: bool,
++    /// Maximum number of relevant memories to inject into the model context per turn
++    /// (default: 5). Set to 0 to disable memory injection entirely.
++    pub memory_max_injection: usize,
++    /// Losslessly spill oversized historical tool results to disk and keep compact previews in history.
++    pub tool_result_spill_enabled: bool,
++    /// Tool result inline byte threshold before historical outputs are spilled.
++    pub tool_result_inline_threshold_bytes: usize,
++    /// Bytes kept from the start of a spilled tool result preview.
++    pub tool_result_preview_head_bytes: usize,
++    /// Bytes kept from the end of a spilled tool result preview.
++    pub tool_result_preview_tail_bytes: usize,
++    /// Preserve full current-turn tool results until the model has had a chance to consume them.
++    pub tool_result_keep_full_current_turn: bool,
++    /// Compact oversized historical tool results immediately before provider sends.
++    pub tool_result_provider_guard: bool,
++    /// Enable the read_tool_artifact rehydration tool.
++    pub tool_result_rehydrate_enabled: bool,
++    /// Optional artifact root. Defaults to ~/.jcode/tool-artifacts.
++    pub tool_result_artifact_dir: Option<String>,
+     /// Update channel: "stable" (releases only) or "main" (latest commits)
+     pub update_channel: UpdateChannel,
+ }
+@@ -580,6 +599,15 @@ impl Default for FeatureConfig {
+             memory: true,
+             swarm: true,
+             message_timestamps: true,
++            memory_max_injection: 5,
++            tool_result_spill_enabled: true,
++            tool_result_inline_threshold_bytes: 4096,
++            tool_result_preview_head_bytes: 1536,
++            tool_result_preview_tail_bytes: 1536,
++            tool_result_keep_full_current_turn: true,
++            tool_result_provider_guard: true,
++            tool_result_rehydrate_enabled: true,
++            tool_result_artifact_dir: None,
+             update_channel: UpdateChannel::default(),
+         }
+     }
+diff --git a/src/agent.rs b/src/agent.rs
+index 2e4fce9e..4e4cfcd5 100644
+--- a/src/agent.rs
++++ b/src/agent.rs
+@@ -430,6 +430,15 @@ impl Agent {
+     }
+ 
+     fn messages_for_provider(&mut self) -> (Vec<Message>, Option<CompactionEvent>) {
++        if crate::config::config().features.tool_result_provider_guard {
++            let fresh_user_turn = crate::message::ends_with_fresh_user_turn(
++                &self.session.messages_for_provider_uncached(),
++            );
++            if fresh_user_turn {
++                let _ = self.session.spill_historical_tool_results();
++            }
++        }
++
+         if self.provider.supports_compaction() || self.session.compaction.is_some() {
+             let compaction = self.registry.compaction();
+             match compaction.try_write() {
+diff --git a/src/lib.rs b/src/lib.rs
+index 7871d0be..c47b66f8 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -78,6 +78,7 @@ pub mod telemetry;
+ pub mod terminal_launch;
+ pub mod todo;
+ pub mod tool;
++pub mod tool_artifacts;
+ pub mod transport;
+ pub mod tui;
+ pub mod update;
+diff --git a/src/session.rs b/src/session.rs
+index 89641156..14e55ec6 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -1317,6 +1317,33 @@ impl Session {
+         self.provider_messages().to_vec()
+     }
+ 
++    pub fn spill_historical_tool_results(&mut self) -> crate::tool_artifacts::SpillStats {
++        let cfg = crate::tool_artifacts::ToolResultSpillConfig::load();
++        let stats = crate::tool_artifacts::compact_historical_tool_results_in_stored_messages(
++            &self.id,
++            &mut self.messages,
++            &cfg,
++        );
++        if stats.count > 0 {
++            self.mark_memory_profile_dirty();
++            self.mark_messages_full_dirty();
++            self.reset_provider_messages_cache();
++            crate::logging::info(&format!(
++                "REQUEST_TOOL_BYTES session={} spill_count={} before={} after={} saved_pct={}",
++                self.id,
++                stats.count,
++                stats.original_bytes,
++                stats.inline_bytes,
++                if stats.original_bytes == 0 {
++                    0
++                } else {
++                    stats.saved_bytes() * 100 / stats.original_bytes
++                },
++            ));
++        }
++        stats
++    }
++
+     /// Drop heavyweight transcript vectors after remote startup has rendered the
+     /// optimistic local history. The authoritative transcript comes from the
+     /// server once the connection is established, so keeping another owned copy
+diff --git a/src/tool/mod.rs b/src/tool/mod.rs
+index 54989a12..65449355 100644
+--- a/src/tool/mod.rs
++++ b/src/tool/mod.rs
+@@ -23,6 +23,7 @@ mod multiedit;
+ mod open;
+ mod patch;
+ mod read;
++mod read_tool_artifact;
+ pub mod selfdev;
+ mod session_search;
+ mod side_panel;
+@@ -114,6 +115,17 @@ impl Registry {
+             let mut timings = Vec::new();
+             let mut m = HashMap::new();
+             Self::insert_tool_timed(&mut m, &mut timings, "read", read::ReadTool::new);
++            if crate::config::config()
++                .features
++                .tool_result_rehydrate_enabled
++            {
++                Self::insert_tool_timed(
++                    &mut m,
++                    &mut timings,
++                    "read_tool_artifact",
++                    read_tool_artifact::ReadToolArtifactTool::new,
++                );
++            }
+             Self::insert_tool_timed(&mut m, &mut timings, "write", write::WriteTool::new);
+             Self::insert_tool_timed(
+                 &mut m,
+diff --git a/src/tool/read_tool_artifact.rs b/src/tool/read_tool_artifact.rs
+new file mode 100644
+index 00000000..db0d8306
+--- /dev/null
++++ b/src/tool/read_tool_artifact.rs
+@@ -0,0 +1,84 @@
++use super::{Tool, ToolContext, ToolOutput};
++use anyhow::Result;
++use async_trait::async_trait;
++use serde::Deserialize;
++use serde_json::{Value, json};
++use std::path::{Path, PathBuf};
++
++pub struct ReadToolArtifactTool;
++
++impl ReadToolArtifactTool {
++    pub fn new() -> Self {
++        Self
++    }
++}
++
++#[derive(Debug, Deserialize)]
++struct ReadToolArtifactInput {
++    #[serde(default)]
++    call_id: Option<String>,
++    #[serde(default)]
++    artifact: Option<String>,
++    #[serde(default)]
++    start_line: Option<usize>,
++    #[serde(default)]
++    end_line: Option<usize>,
++}
++
++#[async_trait]
++impl Tool for ReadToolArtifactTool {
++    fn name(&self) -> &str {
++        "read_tool_artifact"
++    }
++
++    fn description(&self) -> &str {
++        "Read the full raw output for a spilled tool result artifact, by artifact path or unique call_id. Supports optional 1-based line ranges."
++    }
++
++    fn parameters_schema(&self) -> Value {
++        json!({
++            "type": "object",
++            "properties": {
++                "intent": super::intent_schema_property(),
++                "call_id": {
++                    "type": "string",
++                    "description": "Tool call id from a [tool result spilled] block. Must be unique if artifact is omitted."
++                },
++                "artifact": {
++                    "type": "string",
++                    "description": "Artifact path from a [tool result spilled] block. Preferred when available."
++                },
++                "start_line": {
++                    "type": "integer",
++                    "description": "Optional 1-based first line to read."
++                },
++                "end_line": {
++                    "type": "integer",
++                    "description": "Optional 1-based final line to read."
++                }
++            }
++        })
++    }
++
++    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<ToolOutput> {
++        let params: ReadToolArtifactInput = serde_json::from_value(input)?;
++        let path = if let Some(artifact) =
++            params.artifact.as_deref().filter(|s| !s.trim().is_empty())
++        {
++            let p = PathBuf::from(artifact);
++            if p.is_absolute() {
++                p
++            } else {
++                ctx.resolve_path(Path::new(artifact))
++            }
++        } else if let Some(call_id) = params.call_id.as_deref().filter(|s| !s.trim().is_empty()) {
++            crate::tool_artifacts::find_artifact_by_call_id(call_id)?
++        } else {
++            anyhow::bail!("provide either artifact or call_id")
++        };
++
++        let output =
++            crate::tool_artifacts::read_artifact(&path, params.start_line, params.end_line)?;
++        Ok(ToolOutput::new(output).with_title(format!("tool artifact: {}", path.display())))
++    }
++}
+diff --git a/src/tool_artifacts.rs b/src/tool_artifacts.rs
+new file mode 100644
+index 00000000..db314ce9
+--- /dev/null
++++ b/src/tool_artifacts.rs
+@@ -0,0 +1,402 @@
++use crate::config::config;
++use crate::message::{ContentBlock, Message, Role};
++use crate::storage::jcode_dir;
++use anyhow::{Context, Result};
++use sha2::{Digest, Sha256};
++use std::collections::HashMap;
++use std::fs::{self, File};
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++pub const SPILLED_MARKER: &str = "[tool result spilled]";
++
++#[derive(Debug, Clone)]
++pub struct SpillStats {
++    pub count: usize,
++    pub original_bytes: usize,
++    pub inline_bytes: usize,
++}
++
++impl SpillStats {
++    pub fn saved_bytes(&self) -> usize {
++        self.original_bytes.saturating_sub(self.inline_bytes)
++    }
++}
++
++#[derive(Debug, Clone)]
++pub struct SpilledToolResult {
++    pub artifact_path: PathBuf,
++    pub sha256: String,
++    pub original_bytes: usize,
++    pub original_lines: usize,
++    pub inline_replacement: String,
++}
++
++#[derive(Debug, Clone)]
++pub struct ToolResultSpillConfig {
++    pub enabled: bool,
++    pub inline_threshold_bytes: usize,
++    pub preview_head_bytes: usize,
++    pub preview_tail_bytes: usize,
++    pub artifact_dir: PathBuf,
++}
++
++impl ToolResultSpillConfig {
++    pub fn load() -> Self {
++        let features = &config().features;
++        Self {
++            enabled: features.tool_result_spill_enabled,
++            inline_threshold_bytes: features.tool_result_inline_threshold_bytes,
++            preview_head_bytes: features.tool_result_preview_head_bytes,
++            preview_tail_bytes: features.tool_result_preview_tail_bytes,
++            artifact_dir: artifact_dir_from_config(features.tool_result_artifact_dir.as_deref()),
++        }
++    }
++}
++
++fn artifact_dir_from_config(configured: Option<&str>) -> PathBuf {
++    if let Some(path) = configured.filter(|s| !s.trim().is_empty()) {
++        if let Some(rest) = path.strip_prefix("~/") {
++            if let Some(home) = dirs::home_dir() {
++                return home.join(rest);
++            }
++        }
++        return PathBuf::from(path);
++    }
++    jcode_dir()
++        .unwrap_or_else(|_| {
++            dirs::home_dir()
++                .unwrap_or_else(|| PathBuf::from("."))
++                .join(".jcode")
++        })
++        .join("tool-artifacts")
++}
++
++pub fn is_spilled_tool_result(content: &str) -> bool {
++    content.trim_start().starts_with(SPILLED_MARKER)
++}
++
++pub fn spill_tool_result(
++    session_id: &str,
++    tool_call_id: &str,
++    tool_name: &str,
++    raw_text: &str,
++    cfg: &ToolResultSpillConfig,
++) -> Result<SpilledToolResult> {
++    let original_bytes = raw_text.len();
++    let original_lines = count_lines(raw_text);
++    let sha256 = sha256_hex(raw_text.as_bytes());
++    let artifact_path = artifact_path(&cfg.artifact_dir, session_id, tool_call_id, &sha256);
++
++    write_artifact_atomic(&artifact_path, raw_text.as_bytes())?;
++
++    let preview = head_tail_preview(raw_text, cfg.preview_head_bytes, cfg.preview_tail_bytes);
++    let mut inline_replacement = format!(
++        "{SPILLED_MARKER}\n\
++tool={tool_name}\n\
++call_id={tool_call_id}\n\
++original_bytes={original_bytes}\n\
++original_lines={original_lines}\n\
++inline_bytes=0\n\
++artifact={}\n\
++sha256={sha256}\n\
++preview_strategy=head_tail\n\
++preview:\n{preview}",
++        artifact_path.display(),
++    );
++    let inline_bytes = inline_replacement.len();
++    inline_replacement =
++        inline_replacement.replace("inline_bytes=0", &format!("inline_bytes={inline_bytes}"));
++
++    Ok(SpilledToolResult {
++        artifact_path,
++        sha256,
++        original_bytes,
++        original_lines,
++        inline_replacement,
++    })
++}
++
++pub fn compact_historical_tool_results_in_messages(
++    session_id: &str,
++    messages: &mut [Message],
++    cfg: &ToolResultSpillConfig,
++) -> SpillStats {
++    if !cfg.enabled {
++        return SpillStats {
++            count: 0,
++            original_bytes: 0,
++            inline_bytes: 0,
++        };
++    }
++
++    let historical = historical_tool_result_message_flags(messages);
++    let tool_names = tool_name_by_call_id_messages(messages);
++    let mut stats = SpillStats {
++        count: 0,
++        original_bytes: 0,
++        inline_bytes: 0,
++    };
++
++    for (idx, message) in messages.iter_mut().enumerate() {
++        if !historical.get(idx).copied().unwrap_or(false) {
++            continue;
++        }
++        for block in &mut message.content {
++            let ContentBlock::ToolResult {
++                tool_use_id,
++                content,
++                ..
++            } = block
++            else {
++                continue;
++            };
++            if content.len() <= cfg.inline_threshold_bytes || is_spilled_tool_result(content) {
++                continue;
++            }
++            let tool_name = tool_names
++                .get(tool_use_id)
++                .map(String::as_str)
++                .unwrap_or("unknown");
++            match spill_tool_result(session_id, tool_use_id, tool_name, content, cfg) {
++                Ok(spilled) => {
++                    let inline_bytes = spilled.inline_replacement.len();
++                    crate::logging::info(&format!(
++                        "TOOL_RESULT_SPILL tool={} call_id={} original_bytes={} inline_bytes={} saved_bytes={} artifact={}",
++                        tool_name,
++                        tool_use_id,
++                        spilled.original_bytes,
++                        inline_bytes,
++                        spilled.original_bytes.saturating_sub(inline_bytes),
++                        spilled.artifact_path.display(),
++                    ));
++                    stats.count += 1;
++                    stats.original_bytes += spilled.original_bytes;
++                    stats.inline_bytes += inline_bytes;
++                    *content = spilled.inline_replacement;
++                }
++                Err(err) => {
++                    crate::logging::warn(&format!(
++                        "TOOL_RESULT_SPILL_FAILED call_id={} reason={} keeping_inline=true",
++                        tool_use_id, err
++                    ));
++                }
++            }
++        }
++    }
++
++    stats
++}
++
++pub fn compact_historical_tool_results_in_stored_messages(
++    session_id: &str,
++    messages: &mut [jcode_session_types::StoredMessage],
++    cfg: &ToolResultSpillConfig,
++) -> SpillStats {
++    let mut provider_messages: Vec<Message> = messages
++        .iter()
++        .map(jcode_session_types::StoredMessage::to_message)
++        .collect();
++    let stats =
++        compact_historical_tool_results_in_messages(session_id, &mut provider_messages, cfg);
++    if stats.count > 0 {
++        for (stored, compacted) in messages.iter_mut().zip(provider_messages.into_iter()) {
++            stored.content = compacted.content;
++        }
++    }
++    stats
++}
++
++fn historical_tool_result_message_flags(messages: &[Message]) -> Vec<bool> {
++    let mut has_later_assistant = vec![false; messages.len()];
++    let mut seen_later_assistant = false;
++    for (idx, message) in messages.iter().enumerate().rev() {
++        has_later_assistant[idx] = seen_later_assistant;
++        if matches!(message.role, Role::Assistant) {
++            seen_later_assistant = true;
++        }
++    }
++    has_later_assistant
++}
++
++fn tool_name_by_call_id_messages(messages: &[Message]) -> HashMap<String, String> {
++    let mut names = HashMap::new();
++    for message in messages {
++        for block in &message.content {
++            if let ContentBlock::ToolUse { id, name, .. } = block {
++                names.insert(id.clone(), name.clone());
++            }
++        }
++    }
++    names
++}
++
++pub fn read_artifact(
++    path: &Path,
++    start_line: Option<usize>,
++    end_line: Option<usize>,
++) -> Result<String> {
++    let content = fs::read_to_string(path)
++        .with_context(|| format!("failed to read tool artifact {}", path.display()))?;
++    if start_line.is_none() && end_line.is_none() {
++        return Ok(content);
++    }
++    let start = start_line.unwrap_or(1).max(1);
++    let end = end_line.unwrap_or(usize::MAX);
++    let mut out = String::new();
++    for (idx, line) in content.lines().enumerate() {
++        let line_no = idx + 1;
++        if line_no < start {
++            continue;
++        }
++        if line_no > end {
++            break;
++        }
++        out.push_str(line);
++        out.push('\n');
++    }
++    Ok(out)
++}
++
++pub fn find_artifact_by_call_id(call_id: &str) -> Result<PathBuf> {
++    let cfg = ToolResultSpillConfig::load();
++    let safe = safe_component(call_id);
++    let mut matches = Vec::new();
++    if cfg.artifact_dir.exists() {
++        collect_matching_artifacts(&cfg.artifact_dir, &safe, &mut matches)?;
++    }
++    match matches.len() {
++        0 => anyhow::bail!("no tool artifact found for call_id={call_id}"),
++        1 => Ok(matches.remove(0)),
++        _ => anyhow::bail!(
++            "multiple tool artifacts found for call_id={call_id}; pass artifact path explicitly"
++        ),
++    }
++}
++
++fn collect_matching_artifacts(
++    dir: &Path,
++    safe_call_id: &str,
++    matches: &mut Vec<PathBuf>,
++) -> Result<()> {
++    for entry in fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
++        let entry = entry?;
++        let path = entry.path();
++        if path.is_dir() {
++            collect_matching_artifacts(&path, safe_call_id, matches)?;
++        } else if path
++            .file_name()
++            .and_then(|n| n.to_str())
++            .is_some_and(|name| name.starts_with(safe_call_id) && name.ends_with(".txt"))
++        {
++            matches.push(path);
++        }
++    }
++    Ok(())
++}
++
++fn write_artifact_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
++    if path.exists() {
++        let existing = fs::read(path)?;
++        if existing == bytes {
++            return Ok(());
++        }
++    }
++    let parent = path.parent().context("artifact path has no parent")?;
++    fs::create_dir_all(parent)?;
++    let tmp_path = path.with_extension(format!("txt.tmp.{}", std::process::id()));
++    {
++        let mut file = File::create(&tmp_path)?;
++        file.write_all(bytes)?;
++        let _ = file.sync_all();
++    }
++    fs::rename(&tmp_path, path)?;
++    if !path.exists() {
++        anyhow::bail!(
++            "artifact rename succeeded but final path missing: {}",
++            path.display()
++        );
++    }
++    Ok(())
++}
++
++fn artifact_path(root: &Path, session_id: &str, tool_call_id: &str, sha256: &str) -> PathBuf {
++    root.join(safe_component(session_id)).join(format!(
++        "{}-{}.txt",
++        safe_component(tool_call_id),
++        &sha256[..12]
++    ))
++}
++
++fn safe_component(input: &str) -> String {
++    let mut out = String::with_capacity(input.len().min(96));
++    for ch in input.chars() {
++        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
++            out.push(ch);
++        } else {
++            out.push('_');
++        }
++        if out.len() >= 120 {
++            break;
++        }
++    }
++    if out.is_empty() {
++        "unknown".to_string()
++    } else {
++        out
++    }
++}
++
++fn sha256_hex(bytes: &[u8]) -> String {
++    format!("{:x}", Sha256::digest(bytes))
++}
++
++fn count_lines(text: &str) -> usize {
++    if text.is_empty() {
++        0
++    } else {
++        text.lines().count()
++    }
++}
++
++fn head_tail_preview(text: &str, head_bytes: usize, tail_bytes: usize) -> String {
++    let total = text.len();
++    if total <= head_bytes.saturating_add(tail_bytes) {
++        return text.to_string();
++    }
++    let head_end = floor_char_boundary(text, head_bytes.min(total));
++    let tail_start = ceil_char_boundary(text, total.saturating_sub(tail_bytes));
++    format!("{}\n...\n{}", &text[..head_end], &text[tail_start..])
++}
++
++fn floor_char_boundary(text: &str, mut idx: usize) -> usize {
++    while idx > 0 && !text.is_char_boundary(idx) {
++        idx -= 1;
++    }
++    idx
++}
++
++fn ceil_char_boundary(text: &str, mut idx: usize) -> usize {
++    while idx < text.len() && !text.is_char_boundary(idx) {
++        idx += 1;
++    }
++    idx
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn spilled_marker_is_idempotent() {
++        assert!(is_spilled_tool_result("[tool result spilled]\ncall_id=x"));
++        assert!(!is_spilled_tool_result("normal output"));
++    }
++
++    #[test]
++    fn preview_respects_utf8() {
++        let text = "αβγδ".repeat(2000);
++        let preview = head_tail_preview(&text, 1537, 1537);
++        assert!(preview.contains("..."));
++    }
++}
+-- 
+2.54.0
+
