@@ -60,6 +60,26 @@ apply_patch_file() {
   exit 1
 }
 
+apply_diff_patch_file() {
+  local patch="$1"
+  local label
+  label="$(basename "$patch")"
+
+  if git apply --reverse --check "$patch" >/dev/null 2>&1; then
+    echo "✓ patch content already applied: $label"
+    return 0
+  fi
+
+  echo "→ applying diff: $label"
+  if git apply --3way "$patch"; then
+    echo "✓ applied diff: $label"
+    return 0
+  fi
+
+  echo "error: failed to apply diff patch: $patch" >&2
+  exit 1
+}
+
 apply_patch_file "$PATCH_DIR/0001-opencode-cache-model-routing.patch"
 apply_patch_file "$PATCH_DIR/0002-manual-compaction-native-auto.patch"
 apply_patch_file "$PATCH_DIR/0003-manual-compaction-live-manager.patch"
@@ -70,6 +90,7 @@ apply_patch_file "$PATCH_DIR/0007-ghostty-tabs-no-window-fallback.patch"
 apply_patch_file "$PATCH_DIR/0008-server-owned-session-metadata.patch"
 apply_patch_file "$PATCH_DIR/0009-collect-pending-compaction-before-status-check.patch"
 apply_patch_file "$PATCH_DIR/0011-verified-interlang-request-compression.patch"
+apply_diff_patch_file "$PATCH_DIR/0012-lossless-tool-result-spilling.patch"
 
 cargo fmt
 cargo test cached_openai_compatible_models_are_recognized_for_profile_routing
