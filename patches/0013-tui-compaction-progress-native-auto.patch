@@ -1,46 +1,15 @@
-From ce8f5d7290850625f7dddbd6a636c6b5a2547d84 Mon Sep 17 00:00:00 2001
+From 520dccd113eea9665b2d9aefb9c6d4304064176c Mon Sep 17 00:00:00 2001
 From: Ritam <ritamdotghosh@gmail.com>
-Date: Fri, 8 May 2026 23:55:28 +0530
+Date: Sat, 9 May 2026 01:11:00 +0530
 Subject: [PATCH] Fix TUI compaction progress for native-auto providers
 
-Replace remaining uses_jcode_compaction() guards with
-supports_compaction() in all TUI code paths so native-auto
-providers (e.g., opencode-go with auto compaction mode)
-correctly show the compaction progress bar, completion
-messages, and status notices.
-
-Without this fix, the CompactionFinished bus event fires
-correctly but the TUI never collects it because
-poll_compaction_completion, status_notice, and is_compacting
-all returned early for native-auto providers.
-
-Files changed:
-- conversation_state.rs: 6 guards (add_provider_message,
-  reseed, messages_for_provider, poll_compaction_completion)
-- tui_state.rs: 3 guards (status_notice, message skip, draw state)
-- model_context.rs: 1 guard (update_compaction_usage_from_stream)
-- state_ui.rs: 1 guard (info command jcode-managed label)
 ---
- Cargo.lock                        |  2 +-
  src/compaction_tests.rs           | 31 +++++++++++++++++++++++++++++++
- src/tui/app/conversation_state.rs | 10 +++++-----
+ src/tui/app/conversation_state.rs |  8 ++++----
  src/tui/app/model_context.rs      |  5 ++++-
  src/tui/app/tui_state.rs          |  6 +++---
- 5 files changed, 44 insertions(+), 10 deletions(-)
+ 4 files changed, 42 insertions(+), 8 deletions(-)
 
-diff --git a/Cargo.lock b/Cargo.lock
-index 0b545552..895c13c1 100644
---- a/Cargo.lock
-+++ b/Cargo.lock
-@@ -3260,7 +3260,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
- 
- [[package]]
- name = "jcode"
--version = "0.11.4"
-+version = "0.12.0"
- dependencies = [
-  "agentgrep",
-  "anyhow",
 diff --git a/src/compaction_tests.rs b/src/compaction_tests.rs
 index a9d752e7..60c8e203 100644
 --- a/src/compaction_tests.rs
@@ -84,7 +53,7 @@ index a9d752e7..60c8e203 100644
  async fn test_guard_at_95_triggers_hard_compact() {
      let mut manager = CompactionManager::new().with_budget(1_000);
 diff --git a/src/tui/app/conversation_state.rs b/src/tui/app/conversation_state.rs
-index de90f4d2..59022aa2 100644
+index 2b4fce36..4ab622af 100644
 --- a/src/tui/app/conversation_state.rs
 +++ b/src/tui/app/conversation_state.rs
 @@ -205,7 +205,7 @@ impl App {
@@ -123,15 +92,6 @@ index de90f4d2..59022aa2 100644
                      manager.take_compaction_event()
                  } else {
                      None
-@@ -364,7 +364,7 @@ impl App {
-     }
- 
-     pub(super) fn poll_compaction_completion(&mut self) -> bool {
--        if self.is_remote || !self.provider.uses_jcode_compaction() {
-+        if self.is_remote || !self.provider.supports_compaction() {
-             return false;
-         }
-         let provider_messages = self.materialized_provider_messages();
 diff --git a/src/tui/app/model_context.rs b/src/tui/app/model_context.rs
 index e430ff72..f5cb95f9 100644
 --- a/src/tui/app/model_context.rs
@@ -156,7 +116,7 @@ index e430ff72..f5cb95f9 100644
      }
  
 diff --git a/src/tui/app/tui_state.rs b/src/tui/app/tui_state.rs
-index ddb72bad..df041cad 100644
+index 93eeee9c..090fe088 100644
 --- a/src/tui/app/tui_state.rs
 +++ b/src/tui/app/tui_state.rs
 @@ -544,7 +544,7 @@ impl crate::tui::TuiState for App {
@@ -177,7 +137,7 @@ index ddb72bad..df041cad 100644
                  let compaction = self.registry.compaction();
                  let result = compaction
                      .try_read()
-@@ -1068,7 +1068,7 @@ impl crate::tui::TuiState for App {
+@@ -1065,7 +1065,7 @@ impl crate::tui::TuiState for App {
              ambient_info: gather_ambient_info(crate::config::config().ambient.enabled),
              observed_context_tokens: self.current_stream_context_tokens(),
              cache_hit_info,
