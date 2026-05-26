@@ -51,7 +51,7 @@ side_panel = true
 
 [features]
 memory = true
-swarm = false
+swarm = true
 message_timestamps = true
 memory_max_injection = 5
 update_channel = "stable"
